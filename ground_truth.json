@@ -1,0 +1,44 @@
+[
+  {
+    "issue_id": "D01",
+    "requirement_id": "REQ-001",
+    "rule": "ENDPOINT_MISMATCH",
+    "expected": "/api/orders",
+    "actual": "/api/order"
+  },
+  {
+    "issue_id": "D02",
+    "requirement_id": "REQ-002",
+    "rule": "METHOD_MISMATCH",
+    "expected": "GET",
+    "actual": "POST"
+  },
+  {
+    "issue_id": "D03",
+    "requirement_id": "REQ-003",
+    "rule": "STATUS_CODE_MISMATCH",
+    "expected": "200",
+    "actual": "204"
+  },
+  {
+    "issue_id": "D04",
+    "requirement_id": "REQ-004",
+    "rule": "MISSING_OPERATION",
+    "expected": "PATCH /api/orders/{orderId}/status",
+    "actual": "Missing"
+  },
+  {
+    "issue_id": "D05",
+    "requirement_id": "REQ-005",
+    "rule": "REQUIRED_FIELD_MISMATCH",
+    "expected": "note:body:string",
+    "actual": "comment:body:string"
+  },
+  {
+    "issue_id": "D06",
+    "requirement_id": "REQ-006",
+    "rule": "FIELD_TYPE_MISMATCH",
+    "expected": "reason:body:string",
+    "actual": "reason:body:integer"
+  }
+]

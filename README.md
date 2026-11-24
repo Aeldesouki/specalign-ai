@@ -161,7 +161,7 @@ The rules don't depend on Ollama. If Ollama isn't running, the app still shows e
 
 You'll need:
 
-- **Python 3.11 or 3.12**
+- **Python 3.11 or newer** (tested on 3.13)
 - **Git**
 - **Ollama**, from [ollama.com](https://ollama.com)
 
@@ -179,21 +179,21 @@ A virtual environment keeps this project's Python packages separate from everyth
 **Windows (Command Prompt):**
 
 ```
-py -3.11 -m venv .venv
+py -3 -m venv .venv
 .venv\Scripts\activate
 ```
 
 **Windows (PowerShell):**
 
 ```
-py -3.11 -m venv .venv
+py -3 -m venv .venv
 .venv\Scripts\Activate.ps1
 ```
 
 **macOS / Linux:**
 
 ```
-python3.11 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 ```
 
@@ -247,6 +247,14 @@ Type a question and click **Ask**. Some to try:
 
 Under each answer, open **Retrieved evidence** to see exactly which passages the model was given and how closely each one matched your question.
 
+![RAG answer with source citations](screenshots/rag_answer.png)
+
+*An answer from the local Qwen3:4B model to "Is the API consistent with REQ-001?", citing both documents.*
+
+![Retrieved evidence behind the answer](screenshots/rag_evidence.png)
+
+*The passages retrieved from requirements.docx and openapi.yaml, with their similarity scores, that the answer was based on.*
+
 ### Running the tests
 
 ```
@@ -273,16 +281,20 @@ On the **baseline** documents, which agree with each other, the validator found 
 
 On the **faulty** documents, which contain 6 planted mistakes, it found **all 6**, with **no false alarms** and **nothing missed**. That's a precision and recall of 1.00. A finding only counts as correct if both the requirement ID and the type of problem match the answer key.
 
-The project has **36 automated tests**, and all of them pass.
+The project has **38 automated tests**, and all of them pass.
 
 ### Answering questions
 
-<!-- Fill this in from reports/evaluation.md after running scripts/evaluate.py with Ollama. -->
+The AI was asked five test questions about the faulty documents: four about the documents and one about something they don't cover.
 
-- Retrieved the right passages: **[X] of 4** in-scope questions
-- Answers fully supported by the retrieved passages: **[X] of 5**
-- Correctly said "not in the documents" for the payment question: **[Yes/No]**
-- Average time per answer: **[X] seconds** on [your CPU / RAM / GPU]
+- Retrieved the right passages: **4 of 4** in-scope questions
+- Answers fully supported by their sources: **5 of 5**
+- Correctly said "not in the documents" for the payment question: **Yes**
+- Average time per answer: **about 3.5 minutes** on an Intel Core Ultra laptop processor, with no graphics card
+
+The question about the missing operation was answered from the validation findings rather than retrieved passages, which is how it's designed to work, because search can't find something that isn't there.
+
+The evaluation also caught a problem: Qwen3 was still writing out its step-by-step reasoning before each answer, even though it had been asked not to. That made answers slow and cluttered. I fixed it by adding Qwen3's built-in `/no_think` instruction and removing any leftover reasoning before an answer is shown, and added tests for it. Answer times above were measured before this fix, so they should now be faster.
 
 ## 8. Limitations and next steps
 

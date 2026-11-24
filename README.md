@@ -1,232 +1,333 @@
 # SpecAlign AI
 
-**A RAG-enhanced validator that checks whether a software requirements specification and an
-OpenAPI specification agree, and explains the differences using a local language model.**
+**SpecAlign AI checks whether two software documents agree with each other, and if they don't, it explains what's different and why it matters.**
 
-SpecAlign AI reads a Word SRS and an OpenAPI 3.0 YAML file and finds inconsistencies with
-deterministic Python rules, such as a wrong endpoint, method, status code, required field, or field
-type. A local Qwen3:4B model, given only retrieved passages from the two documents, explains each
-finding and answers questions with citations. Everything runs on your own machine through Ollama.
+It compares a requirements document (written in Word) with an API specification (written in YAML). Simple Python rules find the mismatches. A small AI model running on your own computer then explains each problem in plain language and answers your questions about the documents.
 
 ![SpecAlign AI dashboard](screenshots/dashboard.png)
 
 ---
 
-## 1. Problem statement
+## Contents
 
-Teams describe one system in several documents. The SRS says what the system must do. The OpenAPI
-spec says exactly how clients call it. When the two drift apart (a renamed path, a changed status
-code, a field typed as an integer instead of a string), the mismatch usually surfaces late, during
-integration or testing, when it is expensive to fix.
+1. [The problem](#1-the-problem)
+2. [Key terms explained](#2-key-terms-explained)
+3. [How SpecAlign AI works](#3-how-specalign-ai-works)
+4. [Why I built it this way](#4-why-i-built-it-this-way)
+5. [Installation](#5-installation)
+6. [Using the app](#6-using-the-app)
+7. [Results](#7-results)
+8. [Limitations and next steps](#8-limitations-and-next-steps)
+9. [About the sample data](#9-about-the-sample-data)
+10. [Project structure](#10-project-structure)
 
-Checking the documents by hand means matching every requirement to its operation and comparing each
-path, method, status code, and field. That review is slow and repetitive, and it is easy to miss
-something. SpecAlign AI automates the comparison and helps a reviewer understand what it finds.
+---
 
-## 2. Solution overview
+## 1. The problem
 
-SpecAlign AI combines three parts:
+When a team builds software, it usually writes the same plan down more than once. One document describes **what** the system should do. Another describes **exactly how** other programs should talk to it.
 
-1. **Document parsers** turn the Word table and the YAML file into the same record format.
-2. **A rule-based validator** compares the records with six exact checks. It decides whether the
-   documents match.
-3. **Local RAG** (retrieval-augmented generation) retrieves the relevant passages from both
-   documents and asks Qwen3:4B to explain a finding or answer a question, citing its sources.
+These documents are often written by different people at different times. They can slowly drift apart. Someone renames a web address in one document but forgets the other. Someone changes a field from text to a number. Nobody notices until two pieces of software are connected and fail to work together, which is the most expensive time to find out.
 
-The language model never decides whether two values match; that is the validator's job. The model
-only explains evidence the rules have already established.
+Checking for this by hand is slow. You read a requirement, find the matching part of the API spec, then compare the address, the action, the expected response, and every field, one by one. Then you do it again for the next requirement. It's repetitive work where small mistakes are easy to miss.
 
-## 3. Architecture
+SpecAlign AI does that comparison automatically and then helps you understand what it found.
+
+## 2. Key terms explained
+
+If you're new to some of these terms, here's what they mean in this project.
+
+**SRS (Software Requirements Specification).** A document that lists what a system must do, usually as numbered requirements. For example: *"REQ-001: The system shall allow customers to create an order."* In this project, the SRS is a Word file with a table, one row per requirement.
+
+**API (Application Programming Interface).** The way one program talks to another. A web API is a set of web addresses that programs send requests to, like a menu of things you can ask a server to do.
+
+**OpenAPI specification.** A standard way to describe a web API in a text file, usually written in YAML. It lists every address the API offers, what action each one accepts, what data it needs, and what it sends back. Developers build their code from this file, so it has to be correct.
+
+**YAML.** A plain-text format for structured data that uses indentation instead of brackets. It's easy for both people and programs to read.
+
+**Endpoint (or path).** A specific address in an API, such as `/api/orders`.
+
+**HTTP method.** The action you're asking for at an endpoint. The common ones are `GET` (read something), `POST` (create something), `PATCH` (change part of something), and `DELETE` (remove something).
+
+**Status code.** A three-digit number the server sends back to say how a request went. `200` means OK, `201` means something was created, `204` means it worked but there's nothing to return, and `404` means not found.
+
+**Required field.** A piece of data that must be sent with a request. For example, creating an order requires a `customerId`. Each field has a **location** (in the address `path`, in the `query` string, or in the request `body`) and a **type** (such as `string` for text or `integer` for a whole number).
+
+**Requirement ID.** A label like `REQ-004` that identifies one requirement. In the API spec, each operation is tagged with `x-requirement-id: REQ-004` so the tool knows which requirement it implements.
+
+**LLM (Large Language Model).** An AI model that reads and writes text, like the models behind chatbots. This project uses **Qwen3:4B**, a small model with 4 billion parameters that runs on a normal laptop.
+
+**Ollama.** A free program that runs AI models on your own computer instead of in the cloud. Nothing you load into SpecAlign AI is sent over the internet.
+
+**Embedding.** A list of numbers that represents the meaning of a piece of text. Texts with similar meanings get similar numbers, which lets a program find related passages by comparing numbers. This project uses the **nomic-embed-text** model to make embeddings.
+
+**RAG (Retrieval-Augmented Generation).** A way to make an AI answer questions about documents it has never seen. Before the model answers, the program *retrieves* the most relevant passages and gives them to the model along with the question. Think of it as an open-book exam: the model looks at the right pages instead of answering from memory.
+
+**Chunk.** A small, self-contained piece of a document used for retrieval. Here, each requirement is one chunk and each API operation is one chunk.
+
+**Cosine similarity.** A way to measure how close two embeddings are. A higher score means the two texts are more alike in meaning.
+
+**False positive / precision / recall.** Ways to measure how accurate a checker is. A *false positive* is a problem that was reported but isn't real. *Precision* is the share of reported problems that are real. *Recall* is the share of real problems that were found. A perfect checker scores 1.00 on both.
+
+## 3. How SpecAlign AI works
+
+The tool works in three steps.
 
 ```
-          Word SRS + OpenAPI YAML
-                     |
-                     v
-             Document Parsers            src/parsers.py
-                     |
-             +-------+--------+
-             |                |
-             v                v
-         Validator        RAG Index        src/validator.py  |  src/rag.py
-      (6 exact rules)  (nomic-embed-text,
-             |          NumPy cosine)
-             v                |
-          Findings        Retrieval
-             |                |
-             +-------+--------+
-                     |
-                     v
-             Local Qwen3:4B              via Ollama
-                     |
-                     v
-           Streamlit Interface           app.py
+   Word SRS  +  OpenAPI YAML
+             |
+             v
+   Step 1: Read both documents          (src/parsers.py)
+             |
+       +-----+------+
+       |            |
+       v            v
+   Step 2:      Build a search index    (src/validator.py, src/rag.py)
+   Compare      of both documents
+   with rules
+       |            |
+       +-----+------+
+             |
+             v
+   Step 3: Local AI explains and        (Qwen3:4B via Ollama)
+           answers questions
+             |
+             v
+   Streamlit web interface              (app.py)
 ```
 
-Validation results go straight to the interface too, so validation still works when Ollama is off.
+### Step 1: Read both documents
 
-### Validation rules
+The two documents look completely different. One is a Word table and the other is a YAML file. So the first job is to turn both into the same simple format, a list of records that each hold an ID, a method, a path, a status code, and the required fields.
 
-| Rule | Name | Example |
+The Word reader (`parse_requirements`) finds the requirements table and reads it row by row. In the SRS, required fields are written like `orderId:path:string`, meaning "a field called orderId, in the path, of type string."
+
+The YAML reader (`parse_openapi`) walks through every endpoint and method in the API spec and collects the same information.
+
+Every record also remembers which file it came from, so every problem the tool reports can point back to its source.
+
+### Step 2: Compare the documents with rules
+
+Each requirement is matched to the API operation with the same requirement ID. Then six checks run on every pair:
+
+| Rule | What it checks | Example of a problem it catches |
 | --- | --- | --- |
-| V01 | `ENDPOINT_MISMATCH` | `/api/orders` vs `/api/order` |
-| V02 | `METHOD_MISMATCH` | `GET` vs `POST` |
-| V03 | `STATUS_CODE_MISMATCH` | expected `200` is not defined; only `204` is |
-| V04 | `MISSING_OPERATION` | no operation has `x-requirement-id: REQ-004` |
-| V05 | `REQUIRED_FIELD_MISMATCH` | required `note` missing; API requires `comment` instead |
-| V06 | `FIELD_TYPE_MISMATCH` | `reason` is `string` vs `integer` |
+| V01 | Does the endpoint match? | SRS says `/api/orders`, API says `/api/order` |
+| V02 | Does the HTTP method match? | SRS says `GET`, API says `POST` |
+| V03 | Does the API include the expected success code? | SRS expects `200`, API only defines `204` |
+| V04 | Does the requirement have an API operation at all? | Nothing in the API is tagged `REQ-004` |
+| V05 | Are all required fields there, in the right place? | SRS requires `note`, API requires `comment` instead |
+| V06 | Do the field types match? | SRS says `reason` is a string, API says integer |
 
-V03 only checks that the expected success code exists, so additional error responses such as 400 or
-404 are not reported.
+Rule V03 only checks that the expected success code is present. An API is allowed to list extra error codes like `400` or `404`, so those are not reported as problems.
 
-### Design decisions
+Every problem found becomes a **finding** with an ID, the requirement it belongs to, what was expected, what was actually found, and both sources. You can download the findings as a JSON file.
 
-- **Why deterministic validation instead of asking an LLM to find discrepancies?** Comparing `200`
-  with `204` is an exact check. Python gives the same answer every time and can be unit tested. An
-  LLM can miss a difference, invent one, or answer differently on the next run.
-- **Why RAG?** The model has never seen these documents. Retrieval puts the relevant excerpts in
-  front of it, so its explanation is based on the actual text and can cite it.
-- **How are requirements matched to operations?** By the `x-requirement-id` property on each
-  OpenAPI operation, not by path. Because the path is one of the values that might be wrong, matching
-  on it would turn a typo into a "missing operation".
-- **How are unsupported answers avoided?** The system prompt limits the model to the supplied
-  excerpts and findings, requires citations, and tells it to say the information is insufficient
-  when the evidence does not answer the question. If a question names a requirement ID, both
-  documents' chunks for that ID are always retrieved. Questions about what is missing use the full
-  validation results, because a missing operation has no chunk for search to find.
-- **Why a small local model?** Engineering documents are often confidential, so no text leaves the
-  machine. A small 4B model runs on a laptop, and its job (explaining given evidence) does not need a
-  large model.
+### Step 3: Let the local AI explain
 
-## 4. Installation
+Finding a mismatch is only half the job. A reviewer also needs to know what each document says and what could go wrong because of it. That's where the AI comes in.
 
-Requirements: Python 3.11 or 3.12, and [Ollama](https://ollama.com).
+1. Each requirement and each API operation is turned into a chunk of readable text.
+2. Every chunk is converted into an embedding.
+3. When you ask a question, it's converted into an embedding too, and the four closest chunks are found using cosine similarity.
+4. Those chunks, plus any related findings from Step 2, are given to Qwen3:4B along with your question.
+5. The model answers using only that evidence and lists the sources it used.
+
+Two extra rules make retrieval more reliable:
+
+- **If your question names a requirement ID** (like "Is the API consistent with REQ-001?"), the tool always includes *both* documents' chunks for that ID. Similarity search alone might only find one side, and you can't compare two things if you only see one.
+- **If your question asks what's missing** (like "Which requirement has no API operation?"), the tool uses the full list of findings from Step 2. Search can't find something that isn't there, but the rules already know it's missing.
+
+The model is also told to cite its sources, to describe both sides when documents disagree, not to decide which document is "right" (that's a judgment for an engineer), and to say so when the documents don't contain the answer.
+
+## 4. Why I built it this way
+
+**Why use rules to find problems instead of asking the AI?**
+Checking whether `200` equals `204` is a yes-or-no question. Python answers it correctly every time, and I can write tests to prove it. An AI model can miss a difference, invent one that isn't there, or give a different answer if you ask twice. So the rules decide what's wrong, and the AI only explains it.
+
+**Why use RAG at all?**
+The model has never seen these documents. Without retrieval, it would have to guess. With RAG, it reads the exact passages before answering, so its explanation is based on the real text and can point to where that text came from.
+
+**Why match requirements by ID instead of by endpoint?**
+The endpoint is one of the things that might be wrong. If I matched on it, a typo like `/api/order` would look like a completely missing operation instead of a simple endpoint mismatch. Matching by requirement ID keeps the right pairs together so the real problem gets reported.
+
+**Why a small model running locally?**
+Engineering documents are often confidential. Running everything on your own machine means no text ever leaves it, and no API key or paid service is needed. The model's job is to explain evidence it's been given, not to solve hard problems on its own, so a small 4B model is enough.
+
+**Why does validation still work without the AI?**
+The rules don't depend on Ollama. If Ollama isn't running, the app still shows every finding and simply tells you how to start Ollama for the explanations.
+
+## 5. Installation
+
+You'll need:
+
+- **Python 3.11 or 3.12**
+- **Git**
+- **Ollama**, from [ollama.com](https://ollama.com)
+
+### Step 1: Download the project
+
+```
+git clone https://github.com/Aeldesouki/specalign-ai.git
+cd specalign-ai
+```
+
+### Step 2: Create a virtual environment
+
+A virtual environment keeps this project's Python packages separate from everything else on your computer.
 
 **Windows (Command Prompt):**
 
-```bat
-git clone https://github.com/<your-username>/specalign-ai.git
-cd specalign-ai
+```
 py -3.11 -m venv .venv
 .venv\Scripts\activate
-python -m pip install -r requirements.txt
+```
+
+**Windows (PowerShell):**
+
+```
+py -3.11 -m venv .venv
+.venv\Scripts\Activate.ps1
 ```
 
 **macOS / Linux:**
 
-```bash
-python3.11 -m venv .venv && source .venv/bin/activate
+```
+python3.11 -m venv .venv
+source .venv/bin/activate
+```
+
+You'll know it worked when you see `(.venv)` at the start of your command line.
+
+### Step 3: Install the Python packages
+
+```
 python -m pip install -r requirements.txt
 ```
 
-**Local models** (after installing Ollama, which starts in the background):
+### Step 4: Download the AI models
 
-```bash
+Install Ollama first. It runs in the background once it's installed. Then download the two models:
+
+```
 ollama pull qwen3:4b
 ollama pull nomic-embed-text
 ```
 
-## 5. How to run
+Qwen3:4B is about 2.5 GB, so this may take a few minutes.
 
-```bash
+## 6. Using the app
+
+Start the app:
+
+```
 streamlit run app.py
 ```
 
-Your browser opens the app.
+It opens in your web browser. The sidebar shows whether Ollama is ready.
 
-**Tab 1: Validate Documents**
+### Tab 1: Validate Documents
 
-1. Choose **Sample: baseline** or **Sample: faulty**, or upload your own `.docx` and `.yaml`.
-2. Click **Run Validation** to see counts and the discrepancy table.
-3. Select a finding and click **Generate AI explanation**.
-4. Click **Download findings (JSON)** to export the results.
+1. Pick one of the sample datasets, or upload your own `.docx` requirements file and `.yaml` API file.
+   - **Sample: baseline** has documents that agree. You should see 0 problems.
+   - **Sample: faulty** has 6 mistakes planted on purpose. You should see all 6.
+2. Click **Run Validation**. You'll see how many requirements and operations were found, and a table of every problem.
+3. Pick a finding and click **Generate AI explanation** to see what each document says and why the difference matters.
+4. Click **Download findings (JSON)** to save the results.
 
-**Tab 2: Ask the Documentation:** type a question such as *"Is the API consistent with REQ-001?"*
-and click **Ask**. The answer appears with the retrieved evidence and similarity scores.
+### Tab 2: Ask the Documentation
 
-**Tests and evaluation:**
+Type a question and click **Ask**. Some to try:
 
-```bash
-python -m pytest                  # unit tests (no Ollama needed)
-python scripts/evaluate.py        # writes reports/evaluation.md (RAG part needs Ollama)
+- *What does REQ-001 specify?*
+- *Which endpoint retrieves an order?*
+- *Is the API consistent with REQ-001?*
+- *Which requirement has no corresponding API operation?*
+- *What payment-processing API does the system support?* (The documents don't mention payments, so a good answer says the information isn't there.)
+
+Under each answer, open **Retrieved evidence** to see exactly which passages the model was given and how closely each one matched your question.
+
+### Running the tests
+
+```
+python -m pytest
 ```
 
-**Regenerating the sample data:**
+The tests don't need Ollama. They check every rule, the document readers, and the retrieval logic.
 
-```bash
-python data_generation/build_srs.py     # baseline requirements.docx
-python data_generation/make_faulty.py   # faulty copy + ground_truth.json
+### Measuring the results
+
+```
+python scripts/evaluate.py
 ```
 
-## 6. Evaluation results
+This scores the validator against the list of planted mistakes, asks the AI five test questions, and writes everything to `reports/evaluation.md`. If Ollama isn't running, it still scores the validator and skips the AI part.
 
-Full report: [`reports/evaluation.md`](reports/evaluation.md).
+## 7. Results
 
-### Validation (measured with `scripts/evaluate.py`)
+The full report is in [`reports/evaluation.md`](reports/evaluation.md).
 
-| Dataset | Requirements | API operations | Findings |
-| --- | --- | --- | --- |
-| Baseline | 10 | 10 | 0 |
-| Faulty (6 planted errors) | 10 | 9 | 6 |
+### Finding problems
 
-On the faulty dataset, all 6 planted errors were detected, with 0 false positives and 0 missed
-(precision 1.00, recall 1.00). A finding counts as correct only when both its requirement ID and its
-rule match `ground_truth.json`. The test suite has 36 passing tests covering every rule, the
-matching logic, the parsers, and the RAG retrieval and prompt-building logic.
+On the **baseline** documents, which agree with each other, the validator found **0 problems**, which is correct.
 
-### RAG (5 test questions, faulty dataset)
+On the **faulty** documents, which contain 6 planted mistakes, it found **all 6**, with **no false alarms** and **nothing missed**. That's a precision and recall of 1.00. A finding only counts as correct if both the requirement ID and the type of problem match the answer key.
+
+The project has **36 automated tests**, and all of them pass.
+
+### Answering questions
 
 <!-- Fill this in from reports/evaluation.md after running scripts/evaluate.py with Ollama. -->
 
-| Measure | Result |
-| --- | --- |
-| Retrieval relevant | [X] of 4 in-scope questions |
-| Answers fully supported by sources | [X] of 5 |
-| Out-of-scope question (payment API) declined | [Yes/No] |
-| Average answer time | [X] s on [your CPU / RAM / GPU] |
+- Retrieved the right passages: **[X] of 4** in-scope questions
+- Answers fully supported by the retrieved passages: **[X] of 5**
+- Correctly said "not in the documents" for the payment question: **[Yes/No]**
+- Average time per answer: **[X] seconds** on [your CPU / RAM / GPU]
 
-## 7. Limitations
+## 8. Limitations and next steps
 
-- Supports only DOCX (requirements table) and OpenAPI YAML.
-- Assumes a predefined SRS table structure and the `fieldName:location:type` notation.
-- Supports simple inline request schemas with top-level required fields; nested schemas, multiple
-  content types, and `$ref` resolution are out of scope.
-- Requires explicit `x-requirement-id` mappings between documents.
-- The dataset is small and synthetic, so the results show the approach works but not its accuracy
-  on real documents.
-- AI-generated explanations require human review.
+SpecAlign AI is a working prototype, so it has clear limits:
 
-**Possible improvements:** Excel, PowerPoint, and PDF inputs; `$ref` and nested schema support;
-fuzzy matching when IDs are missing; a larger test set with more error types; and a reviewer workflow
-where accepted or rejected findings become new test cases.
+- It only reads Word files (with one requirements table) and OpenAPI YAML files.
+- The Word table has to follow a set layout, and fields must be written as `fieldName:location:type`.
+- It only handles simple API request formats. Nested data and shared definitions (`$ref`) aren't supported yet.
+- It relies on every API operation being tagged with its requirement ID.
+- It was tested on one small, made-up dataset. That shows the approach works, but not how accurate it would be on large real-world documents.
+- AI explanations can still be wrong, so a person should always review them before acting on them.
 
-## 8. Synthetic data disclosure
+Ideas for next steps:
 
-All documents in `sample_docs/` are fictional and describe an imaginary Online Order Management
-System. They were generated with Claude for this project. The prompts and process are in
-[`data_generation/claude_prompts.md`](data_generation/claude_prompts.md). The six errors in the faulty
-dataset were introduced by a script, not by an LLM, so that nothing else changed.
+- Support Excel, PowerPoint, and PDF documents
+- Handle nested data and `$ref` definitions
+- Match requirements to operations by name when IDs are missing
+- Test on a larger set of documents with more kinds of mistakes
+- Let reviewers accept or reject findings, and turn their decisions into new test cases
 
-The application itself uses only local models through Ollama. No OpenAI models, APIs, SDKs, or
-services are used, and no API keys are needed. Do not upload confidential documents to public
-repositories.
+## 9. About the sample data
 
-## Project structure
+All the documents in `sample_docs/` are **made up**. They describe an imaginary online ordering system and contain no real or private information. I generated them with Claude for this project. The prompts and steps I used are in [`data_generation/claude_prompts.md`](data_generation/claude_prompts.md).
+
+The 6 mistakes in the faulty dataset were added by a Python script (`data_generation/make_faulty.py`), not by an AI, so that exactly those 6 things changed and nothing else. The list of planted mistakes is in `ground_truth.json`. It's only used to score the results and is never shown to the AI.
+
+The app itself only uses AI models running locally through Ollama. It doesn't use any cloud AI service, so you don't need an API key. Please don't upload confidential documents to a public repository.
+
+## 10. Project structure
 
 ```
 specalign-ai/
-├── app.py                      Streamlit interface
-├── requirements.txt
+├── app.py                    The Streamlit web interface
+├── requirements.txt          Python packages to install
 ├── src/
-│   ├── parsers.py              Word SRS and OpenAPI parsers
-│   ├── validator.py            Six deterministic rules + scoring
-│   └── rag.py                  Chunking, embeddings, retrieval, Qwen3 answers
+│   ├── parsers.py            Reads the Word SRS and the OpenAPI YAML
+│   ├── validator.py          The six comparison rules and scoring
+│   └── rag.py                Chunks, embeddings, search, and AI answers
 ├── sample_docs/
-│   ├── baseline/               Consistent SRS + API spec
-│   └── faulty/                 Same SRS + API spec with 6 planted errors
-├── data_generation/            Claude prompts and generation scripts
-├── ground_truth.json           The 6 planted errors (evaluation only)
-├── tests/                      pytest suite
-├── scripts/evaluate.py         Writes reports/evaluation.md
-├── reports/evaluation.md
-└── screenshots/
+│   ├── baseline/             Documents that agree
+│   └── faulty/               Same SRS, API spec with 6 planted mistakes
+├── data_generation/          Scripts and prompts used to make the samples
+├── ground_truth.json         The answer key for the 6 planted mistakes
+├── tests/                    Automated tests (pytest)
+├── scripts/evaluate.py       Measures results and writes the report
+├── reports/evaluation.md     The latest results
+└── screenshots/              Images used in this README
 ```
